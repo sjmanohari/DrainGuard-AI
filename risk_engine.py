@@ -1,5 +1,8 @@
-
 from numbers import Real
+import json
+from urllib.request import urlopen
+from urllib.parse import urlencode
+from datetime import datetime, timezone, timedelta
 
 ISSUE_WEIGHTS = {
     "blocked_drain": 35,
@@ -98,3 +101,81 @@ if __name__ == "__main__":
         report_age_hours=3
     )
     print(result)
+
+
+
+
+
+def fetch_rainfall_mm(latitude, longitude, fallback_mm=0):
+    try:
+        if not (-90 <= latitude <= 90):
+            raise ValueError("Invalid latitude")
+        if not (-180 <= longitude <= 180):
+            raise ValueError("Invalid longitude")
+
+        params = urlencode({
+            "latitude": latitude,
+            "longitude": longitude,
+            "hourly": "precipitation",
+            "forecast_days": 2,
+            "timezone": "GMT"
+        })
+
+        url = "https://api.open-meteo.com/v1/forecast?" + params
+
+        with urlopen(url, timeout=4) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+        times = data["hourly"]["time"]
+        rainfall = data["hourly"]["precipitation"]
+
+        now = datetime.now(timezone.utc).replace(
+            minute=0, second=0, microsecond=0
+        )
+        total = 0
+        count = 0
+
+        for time_value, amount in zip(times, rainfall):
+            hour = datetime.fromisoformat(
+                time_value
+            ).replace(tzinfo=timezone.utc)
+
+            if now <= hour < now + timedelta(hours=24):
+                total += float(amount or 0)
+                count += 1
+
+        if count == 0:
+            raise ValueError("Rainfall forecast unavailable")
+
+        return round(total, 2), "Open-Meteo"
+
+    except Exception:
+        return fallback_mm, "Fallback"
+
+
+def assess_drainage_risk(
+    latitude, longitude, severity, issue_type,
+    report_age_hours, fallback_mm=0
+):
+    rainfall_mm, rainfall_source = fetch_rainfall_mm(
+        latitude, longitude, fallback_mm
+    )
+
+    result = calculate_drainage_risk(
+        rainfall_mm, severity, issue_type, report_age_hours
+    )
+
+    result["rainfall_mm"] = rainfall_mm
+    result["rainfall_source"] = rainfall_source
+    return result
+result = assess_drainage_risk(
+    latitude=13.0827,
+    longitude=80.2707,
+    severity="high",
+    issue_type="blocked_drain",
+    report_age_hours=3,
+    fallback_mm=10
+)
+
+print(result)
+
