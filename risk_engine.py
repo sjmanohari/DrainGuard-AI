@@ -1,4 +1,6 @@
+
 from numbers import Real
+import math
 import json
 from urllib.request import urlopen
 from urllib.parse import urlencode
@@ -19,26 +21,36 @@ SEVERITY_WEIGHTS = {
 }
 
 
-def calculate_drainage_risk(rainfall_mm, severity, issue_type, report_age_hours):
-    if isinstance(rainfall_mm, bool) or not isinstance(rainfall_mm, Real):
-        raise ValueError("Rainfall must be a number")
-    if rainfall_mm < 0 or rainfall_mm > 1000:
-        raise ValueError("Rainfall must be between 0 and 1000 mm")
+def validate_number(value, name, minimum, maximum):
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(name + " must be a number")
 
-    if isinstance(report_age_hours, bool) or not isinstance(report_age_hours, Real):
-        raise ValueError("Report age must be a number")
-    if report_age_hours < 0 or report_age_hours > 8760:
-        raise ValueError("Report age must be between 0 and 8760 hours")
+    if not math.isfinite(value) or value < minimum or value > maximum:
+        raise ValueError(
+            name + " must be between " + str(minimum) +
+            " and " + str(maximum)
+        )
+
+
+def calculate_drainage_risk(
+    rainfall_mm, severity, issue_type, report_age_hours
+):
+    validate_number(rainfall_mm, "Rainfall", 0, 1000)
+    validate_number(report_age_hours, "Report age", 0, 8760)
 
     if not isinstance(severity, str):
         raise ValueError("Invalid severity")
+
     severity = severity.strip().lower()
+
     if severity not in SEVERITY_WEIGHTS:
         raise ValueError("Severity must be low, medium, high, or critical")
 
     if not isinstance(issue_type, str):
         raise ValueError("Invalid issue type")
+
     issue_type = issue_type.strip().lower()
+
     if issue_type not in ISSUE_WEIGHTS:
         raise ValueError("Unsupported issue type")
 
@@ -77,10 +89,10 @@ def calculate_drainage_risk(rainfall_mm, severity, issue_type, report_age_hours)
         action = "Continue monitoring and verify the reported issue."
 
     reasons = [
-        f"Rainfall contribution: {rainfall_points} points.",
-        f"Issue contribution: {issue_points} points.",
-        f"Severity contribution: {severity_points} points.",
-        f"Report age contribution: {age_points} points."
+        "Rainfall contribution: " + str(rainfall_points) + " points.",
+        "Issue contribution: " + str(issue_points) + " points.",
+        "Severity contribution: " + str(severity_points) + " points.",
+        "Report age contribution: " + str(age_points) + " points."
     ]
 
     return {
@@ -93,26 +105,12 @@ def calculate_drainage_risk(rainfall_mm, severity, issue_type, report_age_hours)
     }
 
 
-if __name__ == "__main__":
-    result = calculate_drainage_risk(
-        rainfall_mm=35,
-        severity="high",
-        issue_type="blocked_drain",
-        report_age_hours=3
-    )
-    print(result)
-
-
-
-
-
 def fetch_rainfall_mm(latitude, longitude, fallback_mm=0):
-    try:
-        if not (-90 <= latitude <= 90):
-            raise ValueError("Invalid latitude")
-        if not (-180 <= longitude <= 180):
-            raise ValueError("Invalid longitude")
+    validate_number(latitude, "Latitude", -90, 90)
+    validate_number(longitude, "Longitude", -180, 180)
+    validate_number(fallback_mm, "Fallback rainfall", 0, 1000)
 
+    try:
         params = urlencode({
             "latitude": latitude,
             "longitude": longitude,
@@ -132,16 +130,22 @@ def fetch_rainfall_mm(latitude, longitude, fallback_mm=0):
         now = datetime.now(timezone.utc).replace(
             minute=0, second=0, microsecond=0
         )
+        end_time = now + timedelta(hours=24)
+
         total = 0
         count = 0
 
         for time_value, amount in zip(times, rainfall):
-            hour = datetime.fromisoformat(
-                time_value
-            ).replace(tzinfo=timezone.utc)
+            hour = datetime.fromisoformat(time_value)
 
-            if now <= hour < now + timedelta(hours=24):
-                total += float(amount or 0)
+            if hour.tzinfo is None:
+                hour = hour.replace(tzinfo=timezone.utc)
+            else:
+                hour = hour.astimezone(timezone.utc)
+
+            if now <= hour < end_time:
+                if amount is not None:
+                    total += float(amount)
                 count += 1
 
         if count == 0:
@@ -149,7 +153,8 @@ def fetch_rainfall_mm(latitude, longitude, fallback_mm=0):
 
         return round(total, 2), "Open-Meteo"
 
-    except Exception:
+    except Exception as error:
+        print("Open-Meteo unavailable:", str(error))
         return fallback_mm, "Fallback"
 
 
@@ -162,20 +167,26 @@ def assess_drainage_risk(
     )
 
     result = calculate_drainage_risk(
-        rainfall_mm, severity, issue_type, report_age_hours
+        rainfall_mm,
+        severity,
+        issue_type,
+        report_age_hours
     )
 
     result["rainfall_mm"] = rainfall_mm
     result["rainfall_source"] = rainfall_source
+
     return result
-result = assess_drainage_risk(
-    latitude=13.0827,
-    longitude=80.2707,
-    severity="high",
-    issue_type="blocked_drain",
-    report_age_hours=3,
-    fallback_mm=10
-)
 
-print(result)
 
+if __name__ == "__main__":
+    result = assess_drainage_risk(
+        latitude=13.0827,
+        longitude=80.2707,
+        severity="high",
+        issue_type="blocked_drain",
+        report_age_hours=3,
+        fallback_mm=10
+    )
+
+    print(result)
