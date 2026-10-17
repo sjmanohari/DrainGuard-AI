@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from datetime import datetime, timezone
 import sqlite3
 import os
+from risk_engine import calculate_drainage_risk
 
 app = Flask(__name__)
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "drainguard.db")
@@ -81,13 +82,41 @@ def create_report():
             "error": "Check severity (1-5), rainfall (0-500), and coordinates"
         }), 400
 
-    # Transparent rule-based baseline; not a trained ML model.
-    risk_score = round(min(100, severity * 15 + min(rainfall, 50) * 1.1))
-    risk_level = (
-        "High" if risk_score >= 70
-        else "Medium" if risk_score >= 40
-        else "Low"
-    )
+    severity_map = {
+        1: "low",
+        2: "low",
+        3: "medium",
+        4: "high",
+        5: "critical"
+    }
+
+    issue_map = {
+        "blocked drain": "blocked_drain",
+        "blocked_drain": "blocked_drain",
+        "clogged drain": "blocked_drain",
+        "stagnant water": "stagnant_water",
+        "stagnant_water": "stagnant_water",
+        "dumped garbage": "dumped_garbage",
+        "dumped_garbage": "dumped_garbage",
+        "plastic waste": "plastic_waste",
+        "plastic_waste": "plastic_waste"
+    }
+
+    normalized_issue = str(data["issue_type"]).strip().lower()
+    normalized_issue = issue_map.get(normalized_issue, normalized_issue)
+
+    try:
+        risk_result = calculate_drainage_risk(
+            rainfall_mm=rainfall,
+            severity=severity_map[severity],
+            issue_type=normalized_issue,
+            report_age_hours=0
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    risk_score = risk_result["risk_score"]
+    risk_level = risk_result["risk_category"]
 
     created_at = datetime.now(timezone.utc).isoformat()
 
@@ -113,6 +142,9 @@ def create_report():
         "id": report_id,
         "risk_score": risk_score,
         "risk_level": risk_level,
+        "recommended_action": risk_result["recommended_action"],
+        "explanation": risk_result["explanation"],
+        "model_type": risk_result["model_type"],
         "status": "Pending",
         "created_at": created_at
     }), 201
