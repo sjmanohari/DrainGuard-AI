@@ -1,166 +1,222 @@
-from flask import Flask, request, jsonify
-from datetime import datetime, timezone
+
+from flask import Flask, jsonify, request
 import sqlite3
-import os
-from risk_engine import calculate_drainage_risk
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 
 app = Flask(__name__)
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "drainguard.db")
+
+# Store the database in the same folder as this file.
+DB_PATH = Path(__file__).resolve().parent / "drainguard.db"
 
 
-def init_db():
-    with sqlite3.connect(DB_PATH) as conn:
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def current_time():
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def initialize_database():
+    with get_db() as conn:
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS reports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                issue_type TEXT NOT NULL,
-                state TEXT NOT NULL,
-                district TEXT NOT NULL,
-                municipality TEXT NOT NULL,
-                ward TEXT NOT NULL,
+            CREATE TABLE IF NOT EXISTS complaints (
+                complaint_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL,
                 latitude REAL,
                 longitude REAL,
-                severity INTEGER NOT NULL,
-                rainfall REAL DEFAULT 0,
-                risk_score INTEGER DEFAULT 0,
-                risk_level TEXT DEFAULT 'Low',
-                status TEXT DEFAULT 'Pending',
-                created_at TEXT NOT NULL
+                risk_level TEXT NOT NULL DEFAULT 'medium',
+                status TEXT NOT NULL DEFAULT 'submitted',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             )
         """)
 
 
-@app.route("/")
+def complaint_dict(row):
+    return dict(row)
+
+
+@app.get("/")
 def home():
     return jsonify({
-        "project": "DrainGuard AI",
-        "message": "Drainage monitoring backend is running",
-        "status": "ok"
+        "message": "DrainGuard AI backend is running",
+        "health": "/api/health"
     })
 
 
-@app.route("/health")
+@app.get("/api/health")
 def health():
-    return jsonify({"status": "ok", "service": "DrainGuard AI"})
+    return jsonify({"status": "ok"})
 
 
-@app.route("/api/reports", methods=["POST"])
-def create_report():
-    data = request.get_json(silent=True) or {}
+@app.post("/api/complaints")
+def create_complaint():
+    if not request.is_json:
+        return jsonify({"error": "Send JSON data"}), 415
 
-    required = [
-        "issue_type", "state", "district",
-        "municipality", "ward", "severity"
-    ]
-    missing = [
-        field for field in required
-        if field not in data or str(data[field]).strip() == ""
-    ]
+    data = request.get_json(silent=True)
 
-    if missing:
-        return jsonify({
-            "error": "Missing required fields",
-            "missing": missing
-        }), 400
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid JSON object"}), 400
 
-    try:
-        severity = int(data["severity"])
-        if not 1 <= severity <= 5:
-            raise ValueError
-        latitude = float(data["latitude"]) if data.get("latitude") is not None else None
-        longitude = float(data["longitude"]) if data.get("longitude") is not None else None
-        rainfall = float(data.get("rainfall", 0))
+    title = data.get("title")
+    description = data.get("description")
 
-        if not 0 <= rainfall <= 500:
-            raise ValueError
-        if latitude is not None and not -90 <= latitude <= 90:
-            raise ValueError
-        if longitude is not None and not -180 <= longitude <= 180:
-            raise ValueError
-    except (TypeError, ValueError):
-        return jsonify({
-            "error": "Check severity (1-5), rainfall (0-500), and coordinates"
-        }), 400
+    if not isinstance(title, str) or not title.strip():
+        return jsonify({"error": "Title is required"}), 400
 
-    severity_map = {
-        1: "low",
-        2: "low",
-        3: "medium",
-        4: "high",
-        5: "critical"
-    }
+    if not isinstance(description, str) or not description.strip():
+        return jsonify({"error": "Description is required"}), 400
 
-    issue_map = {
-        "blocked drain": "blocked_drain",
-        "blocked_drain": "blocked_drain",
-        "clogged drain": "blocked_drain",
-        "stagnant water": "stagnant_water",
-        "stagnant_water": "stagnant_water",
-        "dumped garbage": "dumped_garbage",
-        "dumped_garbage": "dumped_garbage",
-        "plastic waste": "plastic_waste",
-        "plastic_waste": "plastic_waste"
-    }
-
-    normalized_issue = str(data["issue_type"]).strip().lower()
-    normalized_issue = issue_map.get(normalized_issue, normalized_issue)
+    latitude = data.get("latitude")
+    longitude = data.get("longitude")
 
     try:
-        risk_result = calculate_drainage_risk(
-            rainfall_mm=rainfall,
-            severity=severity_map[severity],
-            issue_type=normalized_issue,
-            report_age_hours=0
-        )
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+        if latitude is not None:
+            latitude = float(latitude)
+            if not -90 <= latitude <= 90:
+                raise ValueError
 
-    risk_score = risk_result["risk_score"]
-    risk_level = risk_result["risk_category"]
+        if longitude is not None:
+            longitude = float(longitude)
+            if not -180 <= longitude <= 180:
+                raise ValueError
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid coordinates"}), 400
 
-    created_at = datetime.now(timezone.utc).isoformat()
+    risk = str(data.get("risk_level", "medium")).lower()
+    if risk not in {"low", "medium", "high", "critical"}:
+        return jsonify({"error": "Invalid risk level"}), 400
 
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.execute("""
-            INSERT INTO reports (
-                issue_type, state, district, municipality, ward,
-                latitude, longitude, severity, rainfall,
-                risk_score, risk_level, status, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?)
+    now = current_time()
+    complaint_id = "DG-" + uuid.uuid4().hex[:12].upper()
+
+    with get_db() as conn:
+        conn.execute("""
+            INSERT INTO complaints (
+                complaint_id, title, description, latitude,
+                longitude, risk_level, status, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            str(data["issue_type"]).strip(),
-            str(data["state"]).strip(),
-            str(data["district"]).strip(),
-            str(data["municipality"]).strip(),
-            str(data["ward"]).strip(),
-            latitude, longitude, severity, rainfall,
-            risk_score, risk_level, created_at
+            complaint_id, title.strip(), description.strip(),
+            latitude, longitude, risk, "submitted", now, now
         ))
-        report_id = cursor.lastrowid
+
+        row = conn.execute(
+            "SELECT * FROM complaints WHERE complaint_id = ?",
+            (complaint_id,)
+        ).fetchone()
 
     return jsonify({
-        "id": report_id,
-        "risk_score": risk_score,
-        "risk_level": risk_level,
-        "recommended_action": risk_result["recommended_action"],
-        "explanation": risk_result["explanation"],
-        "model_type": risk_result["model_type"],
-        "status": "Pending",
-        "created_at": created_at
+        "message": "Complaint submitted successfully",
+        "complaint": complaint_dict(row)
     }), 201
 
 
-@app.route("/api/reports", methods=["GET"])
-def list_reports():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
+@app.get("/api/complaints")
+def get_complaints():
+    with get_db() as conn:
         rows = conn.execute(
-            "SELECT * FROM reports ORDER BY id DESC"
+            "SELECT * FROM complaints ORDER BY created_at DESC"
         ).fetchall()
 
-    return jsonify([dict(row) for row in rows])
+    return jsonify({
+        "count": len(rows),
+        "complaints": [complaint_dict(row) for row in rows]
+    })
 
+
+@app.get("/api/complaints/<complaint_id>")
+def get_one_complaint(complaint_id):
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM complaints WHERE complaint_id = ?",
+            (complaint_id,)
+        ).fetchone()
+
+    if row is None:
+        return jsonify({"error": "Complaint not found"}), 404
+
+    return jsonify({"complaint": complaint_dict(row)})
+
+
+@app.patch("/api/complaints/<complaint_id>")
+def update_complaint(complaint_id):
+    data = request.get_json(silent=True)
+
+    if not isinstance(data, dict) or not data:
+        return jsonify({"error": "Provide JSON update data"}), 400
+
+    allowed = {"status", "risk_level"}
+    if set(data) - allowed:
+        return jsonify({
+            "error": "Only status and risk_level can be updated"
+        }), 400
+
+    updates = {}
+
+    if "status" in data:
+        status = str(data["status"]).lower()
+        if status not in {
+            "submitted", "under_review", "in_progress",
+            "resolved", "rejected"
+        }:
+            return jsonify({"error": "Invalid status"}), 400
+        updates["status"] = status
+
+    if "risk_level" in data:
+        risk = str(data["risk_level"]).lower()
+        if risk not in {"low", "medium", "high", "critical"}:
+            return jsonify({"error": "Invalid risk level"}), 400
+        updates["risk_level"] = risk
+
+    if not updates:
+        return jsonify({"error": "No valid fields provided"}), 400
+
+    updates["updated_at"] = current_time()
+    assignments = ", ".join(
+        f"{field} = ?" for field in updates
+    )
+    values = list(updates.values()) + [complaint_id]
+
+    with get_db() as conn:
+        existing = conn.execute(
+            "SELECT complaint_id FROM complaints WHERE complaint_id = ?",
+            (complaint_id,)
+        ).fetchone()
+
+        if existing is None:
+            return jsonify({"error": "Complaint not found"}), 404
+
+        conn.execute(
+            f"UPDATE complaints SET {assignments} WHERE complaint_id = ?",
+            values
+        )
+
+        row = conn.execute(
+            "SELECT * FROM complaints WHERE complaint_id = ?",
+            (complaint_id,)
+        ).fetchone()
+
+    return jsonify({
+        "message": "Complaint updated successfully",
+        "complaint": complaint_dict(row)
+    })
+
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"error": "Endpoint not found"}), 404
+
+
+initialize_database()
 
 if __name__ == "__main__":
-    init_db()
     app.run(host="0.0.0.0", port=5000, debug=False)
